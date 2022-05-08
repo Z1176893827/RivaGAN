@@ -13,12 +13,12 @@ from torch import optim
 from torch.nn import functional
 from tqdm import tqdm
 
-from rivagan.adversary import Adversary, Critic
-from rivagan.attention import AttentiveDecoder, AttentiveEncoder
-from rivagan.dataloader import load_train_val
-from rivagan.dense import DenseDecoder, DenseEncoder
-from rivagan.noise import Compression, Crop, Scale
-from rivagan.utils import mjpeg, psnr, ssim
+from RivaGAN.rivagan.adversary import  Adversary, Critic
+from RivaGAN.rivagan.attention import AttentiveDecoder, AttentiveEncoder
+from RivaGAN.rivagan.dataloader import load_train_val
+from RivaGAN.rivagan.dense import DenseDecoder, DenseEncoder
+from RivaGAN.rivagan.noise import Compression, Crop, Scale
+from RivaGAN.rivagan.utils import mjpeg, psnr, ssim
 
 
 def get_acc(y_true, y_pred):

@@ -5,6 +5,6 @@ __author__ = 'MIT Data To AI Lab'
 __email__ = 'dailabmit@gmail.com'
 __version__ = '0.1.0.dev0'
 
-from rivagan.rivagan import RivaGAN
+from RivaGAN.rivagan.rivagan import RivaGAN
 
 __all__ = ('RivaGAN', )
