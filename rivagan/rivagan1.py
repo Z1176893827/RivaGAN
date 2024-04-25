@@ -13,13 +13,20 @@ from torch import optim
 from torch.nn import functional
 from tqdm import tqdm
 
-from RivaGAN.rivagan.adversary import  Adversary, Critic
-from RivaGAN.rivagan.attention import AttentiveDecoder, AttentiveEncoder
-from RivaGAN.rivagan.dataloader import load_train_val
-from RivaGAN.rivagan.dense import DenseDecoder, DenseEncoder
-from RivaGAN.rivagan.noise import Compression, Crop, Scale
-from RivaGAN.rivagan.utils import mjpeg, psnr, ssim
+from rivagan.adversary import Adversary, Critic
+from rivagan.attention_3D4_CASA_chuanxing import AttentiveDecoder, AttentiveEncoder
+from rivagan.dataloader import load_train_val
+from rivagan.dense import DenseDecoder, DenseEncoder
+from rivagan.noise import Compression, Crop, Scale, Rot
+from rivagan.utils import mjpeg, psnr, ssim
 
+
+
+# def yuv2bgr(y, u, v):
+#     yuv_img = cv2.merge([y, u, v])
+#     bgr_img = cv2.cvtColor(yuv_img, cv2.COLOR_YUV2BGR)
+#
+#     return bgr_img
 
 def get_acc(y_true, y_pred):
     assert y_true.size() == y_pred.size()
@@ -35,6 +42,7 @@ def make_pair(frames, data_dim, use_bit_inverse=True, multiplicity=1):
     # Add multiplicity to further stabilize training.
     frames = torch.cat([frames] * multiplicity, dim=0).cuda()
     data = torch.zeros((frames.size(0), data_dim)).random_(0, 2).cuda()
+    # print("bit_inverse_data",data.size()) # bit_inverse_data torch.Size([12, 64])
 
     # Add the bit-inverse to stabilize training.
     if use_bit_inverse:
@@ -61,10 +69,10 @@ class RivaGAN(object):
             raise ValueError("Unknown model: %s" % model)
 
     def fit(self, dataset, log_dir=False,
-            seq_len=1, batch_size=12, lr=5e-4,
+            seq_len=1, batch_size=6, lr=5e-4,  # lr = 5e-4
             use_critic=False, use_adversary=False,
             epochs=300, use_bit_inverse=True, use_noise=True):
-
+        print("fit函数开始运行")
         if not log_dir:
             log_dir = "experiments/%s-%s" % (self.model, str(int(time.time())))
         os.makedirs(log_dir, exist_ok=False)
@@ -73,15 +81,26 @@ class RivaGAN(object):
         crop = Crop()
         scale = Scale()
         compress = Compression()
+        rot = Rot()
+        # gaussian = GaussianNoise()
 
         def noise(frames):
+
             if use_noise:
                 if random.random() < 0.5:
                     frames = crop(frames)
+                    # print("噪声启动")
                 if random.random() < 0.5:
                     frames = scale(frames)
                 if random.random() < 0.5:
                     frames = compress(frames)
+
+                # if random.random() < 0.5:
+                #     frames = gaussian(frames)
+                # 这里是否添加 代表 是否在训练集应用旋转噪声层进行预训练
+                # if random.random() < 0.5:
+                #     frames = rot(frames)
+                    # print("xz噪声开始运行")
 
             return frames
 
@@ -117,6 +136,9 @@ class RivaGAN(object):
                 "val.crop_acc": [],
                 "val.scale_acc": [],
                 "val.mjpeg_acc": [],
+                # uanzhuan
+                "val.rot_acc": [],
+                # "val.gaussian_acc": [],
             }
 
             gc.collect()
@@ -126,6 +148,7 @@ class RivaGAN(object):
             # Optimize critic-adversary
             if use_critic or use_adversary:
                 iterator = tqdm(train, ncols=0)
+                # print("优化对抗网络开始运行")
                 for frames in iterator:
                     frames, data = make_pair(frames, self.data_dim,
                                              use_bit_inverse=use_bit_inverse)
@@ -166,12 +189,22 @@ class RivaGAN(object):
 
             # Optimize encoder-decoder
             iterator = tqdm(train, ncols=0)
+            # print("优化解码器编码器")
             for frames in iterator:
+                # print("编码器", frames.size())  # torch.Size([12, 3, 1, 160, 160])
+                # make_pair()是 为了将batch_size增加一倍例如12变成24，增加的12是对水印data取反 例如01  变成10
                 frames, data = make_pair(frames, self.data_dim, use_bit_inverse=use_bit_inverse)
-
+                # print("make_pair", frames.size())  # make_pair torch.Size([24, 3, 1, 160, 160])
+                # print("data",data.size()) # data torch.Size([24, 64])
+                # 水印嵌入
                 wm_frames = self.encoder(frames, data)
+                # print("wm_frames",wm_frames.size()) # wm_frames torch.Size([24, 3, 1, 160, 160])
+
                 wm_raw_data = self.decoder(noise(wm_frames))
+                # print("wm_raw_data", wm_raw_data.size())   # wm_raw_data torch.Size([24, 64])
+
                 wm_mjpeg_data = self.decoder(mjpeg(wm_frames))
+
 
                 loss = 0.0
                 loss += functional.binary_cross_entropy_with_logits(wm_raw_data, data)
@@ -202,8 +235,12 @@ class RivaGAN(object):
 
                     wm_frames = self.encoder(frames, data)
                     wm_crop_data = self.decoder(mjpeg(crop(wm_frames)))
+                    # xuanzhuan
+                    # wm_gaussian_data = self.decoder(mjpeg(gaussian(wm_frames)))
+                    wm_rot_data = self.decoder(mjpeg(rot(wm_frames)))
                     wm_scale_data = self.decoder(mjpeg(scale(wm_frames)))
                     wm_mjpeg_data = self.decoder(mjpeg(wm_frames))
+
 
                     metrics["val.ssim"].append(
                         ssim(frames[:, :, 0, :, :], wm_frames[:, :, 0, :, :]).item())
@@ -211,16 +248,22 @@ class RivaGAN(object):
                         psnr(frames[:, :, 0, :, :], wm_frames[:, :, 0, :, :]).item())
                     metrics["val.crop_acc"].append(get_acc(data, wm_crop_data))
                     metrics["val.scale_acc"].append(get_acc(data, wm_scale_data))
+                    # xuanzhuan
+                    metrics["val.rot_acc"].append(get_acc(data, wm_rot_data))
                     metrics["val.mjpeg_acc"].append(get_acc(data, wm_mjpeg_data))
+                    # metrics["val.gaussian_acc"].append(get_acc(data, wm_gaussian_data))
 
                     iterator.set_description(
-                        "%s | SSIM %.3f | PSNR %.3f | Crop %.3f | Scale %.3f | MJPEG %.3f" % (
+                        "%s | SSIM %.3f | PSNR %.3f | Crop %.3f | Scale %.3f | MJPEG %.3f | Rot %.3f " % (
                             epoch,
                             np.mean(metrics["val.ssim"]),
                             np.mean(metrics["val.psnr"]),
                             np.mean(metrics["val.crop_acc"]),
                             np.mean(metrics["val.scale_acc"]),
                             np.mean(metrics["val.mjpeg_acc"]),
+                            np.mean(metrics["val.rot_acc"]),
+
+                            # np.mean(metrics["val.gaussian_acc"]| gaussian %.3f),
                         )
                     )
 
@@ -235,7 +278,8 @@ class RivaGAN(object):
             with open(os.path.join(log_dir, "metrics.json"), "wt") as fout:
                 fout.write(json.dumps(metrics, indent=2, default=lambda o: str(o)))
 
-            torch.save(self, os.path.join(log_dir, "model.pt"))
+            if (epochs - epoch <=30):
+                torch.save(self, os.path.join(log_dir,"model_"+str(epoch)+".pt"))
             G_scheduler.step(metrics["train.loss"])
 
         return history
@@ -248,7 +292,7 @@ class RivaGAN(object):
 
     def encode(self, video_in, data, video_out):
         assert len(data) == self.data_dim
-
+        print("编码器开始运行")
         video_in = cv2.VideoCapture(video_in)
         width = int(video_in.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(video_in.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -260,9 +304,14 @@ class RivaGAN(object):
 
         for i in tqdm(range(length)):
             ok, frame = video_in.read()
-            frame = torch.FloatTensor([frame]) / 127.5 - 1.0      # (L, H, W, 3)
+            # print("读取到视频帧")
+            frame = torch.FloatTensor([frame])
+
+            frame = frame / 127.5 - 1.0  # (L, H, W, 3)
             frame = frame.permute(3, 0, 1, 2).unsqueeze(0).cuda()  # (1, 3, L, H, W)
-            wm_frame = self.encoder(frame, data)                       # (1, 3, L, H, W)
+
+            wm_frame = self.encoder(frame, data)  # (1, 3, L, H, W)
+
             wm_frame = torch.clamp(wm_frame, min=-1.0, max=1.0)
             wm_frame = (
                 (wm_frame[0, :, 0, :, :].permute(1, 2, 0) + 1.0) * 127.5
@@ -279,7 +328,39 @@ class RivaGAN(object):
 
         for i in tqdm(range(length)):
             ok, frame = video_in.read()
-            frame = torch.FloatTensor([frame]) / 127.5 - 1.0      # (L, H, W, 3)
+            frame = torch.FloatTensor([frame]) / 127.5 - 1.0  # (L, H, W, 3)
             frame = frame.permute(3, 0, 1, 2).unsqueeze(0).cuda()  # (1, 3, L, H, W)
             data = self.decoder(frame)[0].detach().cpu().numpy()
             yield data
+
+
+
+def model_test():
+    list1 = []
+    for i in range(32):
+        list1.append(random.randint(0, 1))
+    data = tuple(list1)
+    print(data)
+    # model = RivaGAN.load("model_2D.pt")
+    # model.encode("/home/izuo/pystation/1.avi", data, "/home/izuo/pystation/output1.avi")
+    # recovered_data = model.decode("/home/izuo/pystation/output1.avi")
+
+    # for arr in recovered_data:
+    #     for i in range(len(arr)):
+    #         if arr[i] == data[i]:
+    #             print(f"Matching")
+    # for recovered_data in model.decode("/home/izuo/pystation/output1.avi"):
+    #       print(recovered_data)
+    #     assert recovered_data == data
+
+
+
+
+if __name__ == "__main__":
+
+    model = RivaGAN()
+    model.fit("/home/izuo/pystation/RivaGAN/data/hollywood2", epochs=100)
+    # model.fit("/home/izuo/pystation/RivaGAN/data/kinetics-dataset/k600_2", epochs=100)
+    # model.save("model_3.27.pt")
+#
+
