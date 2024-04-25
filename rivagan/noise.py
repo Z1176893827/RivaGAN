@@ -1,8 +1,13 @@
 from random import randint, random
 
+import cv2
+import random as rand
 import torch
 import torch_dct as dct
+
 from torch import nn
+
+import numpy as np
 
 
 class Crop(nn.Module):
@@ -31,6 +36,24 @@ class Crop(nn.Module):
         y = randint(0, height - dy - 1)
         return frames[:, :, :, y:y + dy, x:x + dx]
 
+class GaussianNoise(nn.Module):
+    def __init__(self,min_std_dev=0.02, max_std_dev=0.06):
+        super(GaussianNoise, self).__init__()
+        self.min_std_dev = min_std_dev
+        self.max_std_dev = max_std_dev
+
+    def _std_dev(self):
+
+        return self.min_std_dev + random() * (self.max_std_dev - self.min_std_dev)
+
+
+    def forward(self, frames):
+        # 生成与输入帧相同大小的高斯噪声
+        noise = torch.randn(frames.size()).cuda() * self._std_dev()
+
+        # 将噪声添加到输入帧中
+        noisy_frames = frames + noise
+        return noisy_frames
 
 class Scale(nn.Module):
     """
@@ -50,11 +73,71 @@ class Scale(nn.Module):
         return self.min_pct + random() * (self.max_pct - self.min_pct)
 
     def forward(self, frames):
+        # print("scale_frames", frames.size())  # ([24, 3, 1, 160, 160])
         percent = self._pct()
         _, _, depth, height, width = frames.size()
         height, width = int(percent * height), int(percent * width)
         height, width = (height // 4) * 4, (width // 4) * 4
         return nn.AdaptiveAvgPool3d((depth, height, width))(frames)
+
+
+class Rot(nn.Module):
+    """
+    Randomly scales the two spatial dimensions independently to a new size
+    that is between `min_pct` and `max_pct` of the old size.
+
+    Input: (N, 3, L, H, W)
+    Output: (N, 3, L, H, W)
+    """
+
+    def __init__(self, min_rot=0, max_rot=10):
+        super(Rot, self).__init__()
+        self.min_rot = min_rot
+        self.max_rot = max_rot
+
+    def _pct(self):
+        return self.min_rot + random() * (self.max_rot - self.min_rot)
+
+    def forward(self, frames):
+        # print("rot_in_frames",frames.size())
+        # N, D, L, H, W = frames.size()
+        # frame = torch.clamp(frames, min=-1.0, max=1.0)
+        # frame = (  # N C L H W
+        #     (frame[0, :, 0, :, :].permute(1, 2, 0) + 1.0) * 127.5  # 将像素值-1.0~1.0 转到0-255
+        # ).detach().cpu().numpy().astype("uint8")
+        # for i in range(N):
+        #     rows, cols = frame.shape[:2]
+        #     angle = rand.randint(10, 10)  # 旋转方向取（-180，180）中的随机整数值，负为逆时针，正为顺势针
+        #     scale = 1.0  # 0.8 将图像缩放为  80 %
+        #     M = cv2.getRotationMatrix2D((cols / 2, rows / 2), angle, scale)
+        #
+        #     frame = cv2.warpAffine(frame, M, (cols, rows))
+        #
+        #     frame = torch.FloatTensor([frame]) / 127.5 - 1.0  # (L, H, W, 3)
+        #     frame = frame.permute(3, 0, 1, 2).unsqueeze(0).cuda()  # (1, 3, L, H, W)
+        #     out_frame = torch.cat(frame,dim=0)
+        # print("rot_out_frames" , frames.size()) # torch.Size([24, 3, 1, 156, 148])
+
+        # print("rot_in_frames",frames.size())
+        batch_size, num_channels, seq_len, height, width = frames.shape
+        frames = torch.clamp(frames, min=-1.0, max=1.0)
+        output_frames = []
+        for i in range(batch_size):
+            frame = (frames[i, :, 0, :, :].permute(1, 2,
+                                                   0).detach().cpu().numpy() + 1.0) * 127.5  # 将像素值-1.0~1.0 转到0-255
+            rows, cols = frame.shape[:2]
+            angle = rand.randint(self.min_rot, self.max_rot)
+            scale = 1.0  # 0.8 将图像缩放为  80 %
+            M = cv2.getRotationMatrix2D((cols / 2, rows / 2), angle, scale)
+            frame = cv2.warpAffine(frame, M, (cols, rows))
+            frame = (torch.FloatTensor(frame).permute(2, 0, 1) / 127.5 - 1.0).unsqueeze(
+                0)  # (1, C, H, W)
+            output_frames.append(frame)
+        output_frames = torch.cat(output_frames, dim=0)  # (batch_size, C, H, W)
+        output_frames = output_frames.unsqueeze(2).repeat(1, 1, seq_len, 1,1).cuda()  # (batch_size, C, seq_len, H, W)
+        # print("out",output_frames.size()) #  out torch.Size([1, 3, 1, 360, 480])
+
+        return output_frames
 
 
 class Compression(nn.Module):
